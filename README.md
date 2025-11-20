@@ -1,76 +1,195 @@
 # Jest coverage diff
 
-Use the action to get jest coverage diff for pull requests as a comment on the pull request
-Helps the code reviewer to get the high level view of code coverage changes without leaving the pull request window
+Use the action to get jest coverage diff for pull requests as a comment on the pull request.
+Helps the code reviewer to get the high level view of code coverage changes without leaving the pull request window.
 
-example:
+**Now with full Monorepo Support!** 🎉
 
-Code coverage comparison master vs testBranch:
+## Features
 
- File | % Stmts | % Branch | % Funcs | % Lines
- -----|---------|----------|---------|------
-total | ~~99.55~~ **97.73** | ~~100~~ **96.97** | ~~97.96~~ **95.92** | ~~99.54~~ **97.7**
-src/Error/TestError.ts | ~~100~~ **77.78** | ~~100~~ **100** | ~~100~~ **66.67** | ~~100~~ **77.78**
-src/Utility/Utility.ts | ~~96.67~~ **90** | ~~100~~ **75** | ~~88.89~~ **88.89** | ~~96.67~~ **90**
+- 📊 Beautiful, collapsible coverage reports
+- 🏗️ **Monorepo support** - automatically discovers and compares coverage for all projects
+- 📈 Weighted total coverage calculation across multiple projects
+- 🆕 Highlights new projects
+- 🎯 Shows only projects with changes
+- 📁 File-level coverage details for each project
+- ⚠️ Configurable thresholds to fail CI on coverage drops
+
+## Example Output
+
+### Summary
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Lines | 70.29% | 69.53% | 🟡 -0.76% |
+| Statements | 69.97% | 69.13% | 🟡 -0.84% |
+| Functions | 59.35% | 56.85% | 🟡 -2.50% |
+| Branches | 48.91% | 47.39% | 🟡 -1.52% |
+
+### 📦 Package Details
+
+<details>
+<summary>📦 backend/liquidity-service (🟡 -4.01%)</summary>
+
+#### Package Summary
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Lines | 85.07% | 81.06% | 🟡 -4.01% |
+| Statements | 84.71% | 80.46% | 🟡 -4.25% |
+| Functions | 76.27% | 69.49% | 🟡 -6.78% |
+| Branches | 71.11% | 61.11% | 🟡 -10.00% |
+
+</details>
 
 # How It Works
 
-uses the following jest command to get code coverage summary as json for the pull request.
-```bash
-npx jest --coverage --coverageReporters="json-summary"
-```
+The action is a **pure comparison tool** - it recursively searches for all `coverage-summary.json` files in the specified directories and generates a comprehensive diff report.
 
-Then switches branch to the base branch on which the pull request has been raised and runs the same command again.
-Calculates the diff between the two reports to figure out additions, removals, increase or decrease in code coverage.
-And then posts that diff as a comment on the PR
+## Typical Workflow
 
-NOTE : The action will work perfectly only for pull requests. Have not been tested with other events or on schedule workflows
+1. Run your tests and generate coverage for the current PR branch
+2. Download baseline coverage from S3/artifact storage (using base branch SHA)
+3. Action compares all projects and generates a beautiful diff comment
+4. Optionally fails CI if coverage drops below threshold
+
+**Note**: The action does NOT run tests or perform git operations. You must provide pre-generated coverage files in both directories.
 
 # Configuration
 
-The action assumes jest configuration and jest module already present in the workflow and uses the installed module and the already present config to run the tests.
+## Inputs
 
-**NEW:**
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `accessToken` | GitHub token for commenting on PR | No | `${{ github.token }}` |
+| `newCoveragePath` | Path to new/current coverage directory | **Yes** | - |
+| `oldCoveragePath` | Path to baseline coverage directory | **Yes** | - |
+| `useSameComment` | Update existing comment instead of creating new ones | No | `false` |
+| `delta` | Maximum allowed coverage drop per project (percentage) | No | `100` |
+| `total_delta` | Maximum allowed total coverage drop (percentage) | No | `null` |
 
- - The action now supports runnning a command just after switching to base branch, this is extremely helpful in cases where there might be some packages removed in the pull request raised, in such cases there now is a possibility to re run the npm ci/npm install commands before running the jset coverage on base branch. Use `afterSwitchCommand` variable to pass a custom command to be run after switching to base branch.
- - The action now supports custom run command, for custom use cases, using the variable runCommand, you can now pass your own command to run. Following is an example where we want to collect coverage from only few files out of all the code and want to use custom options such as `forceExit` & `detectOpenHandles`.
-```bash
-   runCommand: "npx jest --collectCoverageFrom='[\"src/**/*.{js,jsx,ts,tsx}\"]' --coverage --collectCoverage=true --coverageDirectory='./' --coverageReporters='json-summary' --forceExit --detectOpenHandles test/.*test.*"
-```
-**NOTE:** If using custom command, `--coverage --collectCoverage=true --coverageDirectory='./' --coverageReporters='json-summary'`, these options are necessary for the action to work properly. These options tells jest to collect the coverage in json summary format and put the final output in the root folder. Since these are necessary, will make the action add them automatically in the next version.
+## Sample Workflow - Monorepo
 
- - Do you want to fail the workflow if the commited code decreases the percentage below a tolerable level? Do you to start a healthy culture of writing test cases?
- The action now also supports failing the run if percentage diff is more than a specified delta value for any file, you can specify the delta value using the variable delta
- ```bash
-   delta: 1 // the action will fail if any of the percentage dip is more than 1% for any changed file
- ```
-
-Sample workflow for running this action
-
-```
-name: Node.js CI
+```yaml
+name: Coverage Diff
 
 on: pull_request
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        node-version: [14.x]
-        platform: [ubuntu-latest]
-    runs-on: ${{ matrix.platform }}
+  coverage:
+    runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
-      with:
-        node-version: ${{ matrix.node-version }}
-    - run: npm ci
-    - name: TestCoverage
-      id: testCoverage
-      uses: anuraag016/Jest-Coverage-Diff@master
-      with:
-        fullCoverageDiff: false // defaults to false, if made true whole coverage report is commented with the diff
-        runCommand: "npx jest --collectCoverageFrom='[\"src/**/*.{js,jsx,ts,tsx}\"]' --coverage --collectCoverage=true --coverageDirectory='./' --coverageReporters='json-summary' --forceExit --detectOpenHandles test/.*test.*"
-        delta: 0.5
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      # Generate coverage for current PR
+      - name: Run tests with coverage
+        run: npm run test:coverage
+      
+      # Download baseline coverage from S3
+      - name: Download baseline coverage
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          aws s3 sync s3://your-bucket/coverage/$BASE_SHA/ baseline/coverage/
+      
+      # Compare coverage
+      - name: Coverage Diff
+        uses: talkl/Jest-Coverage-Diff@master
+        with:
+          newCoveragePath: coverage
+          oldCoveragePath: baseline/coverage
+          useSameComment: true
+          delta: 1
+          total_delta: 0.5
 ```
+
+## Sample Workflow - Single Project
+
+```yaml
+name: Coverage Diff
+
+on: pull_request
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - run: npm ci
+      
+      # Run tests and generate coverage
+      - name: Generate current coverage
+        run: npx jest --coverage --coverageReporters="json-summary" --coverageDirectory="./coverage"
+      
+      # Switch to base branch and generate baseline coverage
+      - name: Generate baseline coverage
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git checkout origin/${{ github.event.pull_request.base.ref }}
+          npm ci
+          npx jest --coverage --coverageReporters="json-summary" --coverageDirectory="./baseline/coverage"
+          git checkout -
+      
+      - name: Coverage Diff
+        uses: talkl/Jest-Coverage-Diff@master
+        with:
+          newCoveragePath: coverage
+          oldCoveragePath: baseline/coverage
+          delta: 1
+```
+
+## Monorepo Directory Structure
+
+The action expects the following structure:
+
+```
+coverage/
+├── apps/
+│   ├── backend/
+│   │   ├── liquidity-service/
+│   │   │   └── coverage-summary.json
+│   │   └── audit-logs-service/
+│   │       └── coverage-summary.json
+│   └── frontend/
+│       └── coverage-summary.json
+└── packages/
+    ├── utils/
+    │   └── coverage-summary.json
+    └── components/
+        └── coverage-summary.json
+```
+
+Each `coverage-summary.json` should follow the standard Jest coverage format.
+
+## Advanced Configuration
+
+### Delta Thresholds
+
+- `delta`: Per-project threshold (e.g., `1` = fail if any project drops >1%)
+- `total_delta`: Overall threshold (e.g., `0.5` = fail if total coverage drops >0.5%)
+
+## Notes
+
+- The action works best with pull request events
+- Projects that exist in baseline but not in new coverage are silently ignored
+- New projects are highlighted with 🆕 but don't cause failures
+- Only projects with actual changes are shown in the comment
+- All details are collapsed by default for a clean view
+
+## License
+
+MIT

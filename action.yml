@@ -1,19 +1,16 @@
 name: 'Jest Coverage Diff'
 description: 'A github action to comment jest coverage diff on a PR'
-author: 'Anuraag Puri'
+author: 'Tal Kleiner'
 inputs:
   accessToken:
     description: 'access token required to comment on a pr'
     default: ${{ github.token }}
-  fullCoverageDiff:
-    description: 'get the full coverage with diff or only the diff'
-    default: false
-  runCommand:
-    description: 'custom command to get json-summary'
-    default: 'npx jest --coverage --coverageReporters="json-summary" --coverageDirectory="./"'
-  afterSwitchCommand:
-    description: 'command to run after switching to default branch'
-    default: null
+  newCoveragePath:
+    description: 'path to the new coverage directory (searches recursively for coverage-summary.json files)'
+    required: true
+  oldCoveragePath:
+    description: 'path to the old/baseline coverage directory (searches recursively for coverage-summary.json files)'
+    required: true
   delta:
     description: 'Difference between the old and final test coverage'
     default: 100

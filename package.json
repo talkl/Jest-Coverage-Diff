@@ -2,7 +2,7 @@
   "name": "jest-coverage-diff",
   "version": "0.0.0",
   "private": true,
-  "description": "A github action to comment jest coverage diff on a PR",
+  "description": "A github action to comment jest coverage diff on a PR with full monorepo support",
   "main": "src/main.ts",
   "scripts": {
     "build": "tsc",
@@ -15,15 +15,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anuraag016/Jest-Coverage-Diff"
+    "url": "git+https://github.com/talkl/Jest-Coverage-Diff"
   },
   "keywords": [
     "actions",
     "node",
     "jest",
-    "coverage"
+    "coverage",
+    "monorepo"
   ],
-  "author": "Anuraag Puri",
+  "author": "Tal Kleiner",
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^1.2.4",
@@ -33,7 +34,7 @@
     "@types/jest": "^24.9.1",
     "@types/node": "^12.12.50",
     "@typescript-eslint/parser": "^2.34.0",
-    "@zeit/ncc": "^0.20.5",
+    "@vercel/ncc": "^0.38.1",
     "eslint": "^5.16.0",
     "eslint-plugin-github": "^2.0.0",
     "eslint-plugin-jest": "^22.21.0",

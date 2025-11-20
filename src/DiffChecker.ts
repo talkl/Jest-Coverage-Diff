@@ -154,7 +154,9 @@ export class DiffChecker {
   }
 
   private getPercentage(coverageData: CoverageData): number {
-    return coverageData?.pct || 0
+    const pct = coverageData?.pct
+    // Handle "Unknown" string values from coverage reports (when total is 0)
+    return typeof pct === 'number' ? pct : 0
   }
 
   private getStatusIcon(
