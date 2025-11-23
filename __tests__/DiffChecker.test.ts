@@ -70,11 +70,11 @@ describe('DiffChecker', () => {
     const diffChecker = new DiffChecker(codeCoverageNew, codeCoverageOld)
     const details = diffChecker.getCoverageDetails(false, '')
     expect(details).toStrictEqual([
-      ' :green_circle: | file1 | 100 **(1)** | 100 **(1)** | 100 **(1)** | 100 **(1)**',
-      ' :red_circle: | file2 | 99 **(-1)** | 99 **(-1)** | 99 **(-1)** | 99 **(-1)**',
-      ' :sparkles: :new: | **file3** | **100** | **100** | **100** | **100**',
-      ' :red_circle: | file5 | 99 **(0)** | 0 **(-99)** | 99 **(0)** | 99 **(0)**',
-      ' :x: | ~~file4~~ | ~~100~~ | ~~100~~ | ~~100~~ | ~~100~~'
+      '| :green_circle: | file1 | 100 **(1)** | 100 **(1)** | 100 **(1)** | 100 **(1)** |',
+      '| :red_circle: | file2 | 99 **(-1)** | 99 **(-1)** | 99 **(-1)** | 99 **(-1)** |',
+      '| :sparkles: :new: | **file3** | **100** | **100** | **100** | **100** |',
+      '| :red_circle: | file5 | 99 **(0)** | 0 **(-99)** | 99 **(0)** | 99 **(0)** |',
+      '| :x: | ~~file4~~ | ~~100~~ | ~~100~~ | ~~100~~ | ~~100~~ |'
     ])
   })
   describe('testing checkIfTestCoverageFallsBelowDelta', () => {

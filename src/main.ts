@@ -8,128 +8,22 @@ import {Octokit} from '@octokit/core'
 import {PaginateInterface} from '@octokit/plugin-paginate-rest'
 import {RestEndpointMethods} from '@octokit/plugin-rest-endpoint-methods/dist-types/generated/method-types'
 
-interface ProjectCoverage {
+interface ProjectComparison {
   projectPath: string
-  coverage: CoverageReport
-}
-
-interface CoverageMetrics {
-  lines: {total: number; covered: number; skipped: number; pct: number}
-  statements: {total: number; covered: number; skipped: number; pct: number}
-  functions: {total: number; covered: number; skipped: number; pct: number}
-  branches: {total: number; covered: number; skipped: number; pct: number}
-}
-
-function normalizePct(pct: number | string | undefined): number {
-  // Handle "Unknown" string values from coverage reports (when total is 0)
-  return typeof pct === 'number' ? pct : 0
-}
-
-interface RawCoverageMetrics {
-  lines: {
-    total: number
-    covered: number
-    skipped: number
-    pct: number | string
-  }
-  statements: {
-    total: number
-    covered: number
-    skipped: number
-    pct: number | string
-  }
-  functions: {
-    total: number
-    covered: number
-    skipped: number
-    pct: number | string
-  }
-  branches: {
-    total: number
-    covered: number
-    skipped: number
-    pct: number | string
-  }
-}
-
-function normalizeCoverageMetrics(
-  metrics: RawCoverageMetrics
-): CoverageMetrics {
-  // Normalize coverage metrics to ensure pct values are numbers, not "Unknown" strings
-  return {
-    lines: {
-      total: metrics.lines.total,
-      covered: metrics.lines.covered,
-      skipped: metrics.lines.skipped,
-      pct: normalizePct(metrics.lines.pct)
-    },
-    statements: {
-      total: metrics.statements.total,
-      covered: metrics.statements.covered,
-      skipped: metrics.statements.skipped,
-      pct: normalizePct(metrics.statements.pct)
-    },
-    functions: {
-      total: metrics.functions.total,
-      covered: metrics.functions.covered,
-      skipped: metrics.functions.skipped,
-      pct: normalizePct(metrics.functions.pct)
-    },
-    branches: {
-      total: metrics.branches.total,
-      covered: metrics.branches.covered,
-      skipped: metrics.branches.skipped,
-      pct: normalizePct(metrics.branches.pct)
-    }
-  }
-}
-
-interface ProjectDiff {
-  projectName: string
-  projectPath: string
-  before: CoverageMetrics
-  after: CoverageMetrics
+  diffChecker: DiffChecker
   isNew: boolean
-  hasChanges: boolean
-  diffChecker: DiffChecker | null
+  newCoverage: CoverageReport
+  oldCoverage: CoverageReport
 }
 
 /**
- * Transforms coverage report keys to use the project path as the base
- * For example, if projectPath is "apps/backend/liquidity-service":
- * - Input key: "/home/runner/work/grain/grain/apps/backend/liquidity-service/src/app/forwards/service.ts"
- * - Output key: "apps/backend/liquidity-service/src/app/forwards/service.ts"
+ * Find all coverage-summary.json files in a directory
+ * Returns array of {relativePath, fullPath} objects
  */
-function normalizeCoverageKeys(
-  coverage: CoverageReport,
-  projectPath: string
-): CoverageReport {
-  const normalized: CoverageReport = {}
-
-  for (const [key, value] of Object.entries(coverage)) {
-    // Keep 'total' as is
-    if (key === 'total') {
-      normalized[key] = value
-      continue
-    }
-
-    // Find the projectPath in the key and extract from that point
-    const index = key.indexOf(projectPath)
-    if (index !== -1) {
-      // Use the path starting from projectPath
-      const normalizedKey = key.substring(index)
-      normalized[normalizedKey] = value
-    } else {
-      // If projectPath not found, keep original key
-      normalized[key] = value
-    }
-  }
-
-  return normalized
-}
-
-function findCoverageSummaryFiles(baseDir: string): ProjectCoverage[] {
-  const results: ProjectCoverage[] = []
+function findCoverageSummaryFiles(
+  baseDir: string
+): {relativePath: string; fullPath: string}[] {
+  const results: {relativePath: string; fullPath: string}[] = []
 
   function searchDirectory(dir: string): void {
     if (!fs.existsSync(dir)) {
@@ -144,23 +38,8 @@ function findCoverageSummaryFiles(baseDir: string): ProjectCoverage[] {
       if (entry.isDirectory()) {
         searchDirectory(fullPath)
       } else if (entry.name === 'coverage-summary.json') {
-        try {
-          const rawCoverage = JSON.parse(fs.readFileSync(fullPath, 'utf8'))
-          const relativePath = path.relative(baseDir, path.dirname(fullPath))
-
-          // Normalize the coverage keys to use the project path from the directory structure
-          const normalizedCoverage = normalizeCoverageKeys(
-            rawCoverage,
-            relativePath
-          )
-
-          results.push({
-            projectPath: relativePath,
-            coverage: normalizedCoverage
-          })
-        } catch (error) {
-          core.warning(`Failed to read coverage file: ${fullPath}`)
-        }
+        const relativePath = path.relative(baseDir, path.dirname(fullPath))
+        results.push({relativePath, fullPath})
       }
     }
   }
@@ -169,242 +48,290 @@ function findCoverageSummaryFiles(baseDir: string): ProjectCoverage[] {
   return results
 }
 
-function calculateWeightedTotals(
-  projects: ProjectDiff[]
-): {before: CoverageMetrics; after: CoverageMetrics} {
-  const beforeTotals = {
-    lines: {total: 0, covered: 0, skipped: 0},
-    statements: {total: 0, covered: 0, skipped: 0},
-    functions: {total: 0, covered: 0, skipped: 0},
-    branches: {total: 0, covered: 0, skipped: 0}
+/**
+ * Normalize file paths in coverage report to be relative to the project path
+ * This handles cases where coverage was generated on different machines with different absolute paths
+ *
+ * Strategy: Look for the project path pattern in the absolute path and extract everything from that point
+ * Example: If coverage file is at "coverage/apps/backend/service/coverage-summary.json"
+ * - projectRelativePath = "apps/backend/service"
+ * - Absolute path = "/Users/me/project/apps/backend/service/src/file.ts"
+ * - Normalized = "apps/backend/service/src/file.ts"
+ */
+function normalizeCoveragePaths(
+  coverageReport: CoverageReport,
+  projectRelativePath: string
+): CoverageReport {
+  const normalized: CoverageReport = {}
+
+  // Keep the total entry as-is
+  if (coverageReport.total) {
+    normalized.total = coverageReport.total
   }
 
-  const afterTotals = {
-    lines: {total: 0, covered: 0, skipped: 0},
-    statements: {total: 0, covered: 0, skipped: 0},
-    functions: {total: 0, covered: 0, skipped: 0},
-    branches: {total: 0, covered: 0, skipped: 0}
-  }
+  // Split the project path into parts for matching
+  const projectParts = projectRelativePath.split(path.sep).filter(p => p)
 
-  for (const project of projects) {
-    if (!project.isNew) {
-      beforeTotals.lines.total += project.before.lines.total
-      beforeTotals.lines.covered += project.before.lines.covered
-      beforeTotals.lines.skipped += project.before.lines.skipped
-      beforeTotals.statements.total += project.before.statements.total
-      beforeTotals.statements.covered += project.before.statements.covered
-      beforeTotals.statements.skipped += project.before.statements.skipped
-      beforeTotals.functions.total += project.before.functions.total
-      beforeTotals.functions.covered += project.before.functions.covered
-      beforeTotals.functions.skipped += project.before.functions.skipped
-      beforeTotals.branches.total += project.before.branches.total
-      beforeTotals.branches.covered += project.before.branches.covered
-      beforeTotals.branches.skipped += project.before.branches.skipped
+  // Process each file entry
+  for (const [filePath, coverage] of Object.entries(coverageReport)) {
+    if (filePath === 'total') {
+      continue
     }
 
-    afterTotals.lines.total += project.after.lines.total
-    afterTotals.lines.covered += project.after.lines.covered
-    afterTotals.lines.skipped += project.after.lines.skipped
-    afterTotals.statements.total += project.after.statements.total
-    afterTotals.statements.covered += project.after.statements.covered
-    afterTotals.statements.skipped += project.after.statements.skipped
-    afterTotals.functions.total += project.after.functions.total
-    afterTotals.functions.covered += project.after.functions.covered
-    afterTotals.functions.skipped += project.after.functions.skipped
-    afterTotals.branches.total += project.after.branches.total
-    afterTotals.branches.covered += project.after.branches.covered
-    afterTotals.branches.skipped += project.after.branches.skipped
-  }
+    let normalizedPath = filePath
 
-  return {
-    before: {
-      lines: {
-        total: beforeTotals.lines.total,
-        covered: beforeTotals.lines.covered,
-        skipped: beforeTotals.lines.skipped,
-        pct:
-          beforeTotals.lines.total - beforeTotals.lines.skipped > 0
-            ? (beforeTotals.lines.covered /
-                (beforeTotals.lines.total - beforeTotals.lines.skipped)) *
-              100
-            : 0
-      },
-      statements: {
-        total: beforeTotals.statements.total,
-        covered: beforeTotals.statements.covered,
-        skipped: beforeTotals.statements.skipped,
-        pct:
-          beforeTotals.statements.total - beforeTotals.statements.skipped > 0
-            ? (beforeTotals.statements.covered /
-                (beforeTotals.statements.total -
-                  beforeTotals.statements.skipped)) *
-              100
-            : 0
-      },
-      functions: {
-        total: beforeTotals.functions.total,
-        covered: beforeTotals.functions.covered,
-        skipped: beforeTotals.functions.skipped,
-        pct:
-          beforeTotals.functions.total - beforeTotals.functions.skipped > 0
-            ? (beforeTotals.functions.covered /
-                (beforeTotals.functions.total -
-                  beforeTotals.functions.skipped)) *
-              100
-            : 0
-      },
-      branches: {
-        total: beforeTotals.branches.total,
-        covered: beforeTotals.branches.covered,
-        skipped: beforeTotals.branches.skipped,
-        pct:
-          beforeTotals.branches.total - beforeTotals.branches.skipped > 0
-            ? (beforeTotals.branches.covered /
-                (beforeTotals.branches.total - beforeTotals.branches.skipped)) *
-              100
-            : 0
+    // Use both forward slash and backslash to handle cross-platform paths
+    const pathParts = filePath.split(/[/\\]/).filter(p => p)
+
+    // Look for the deepest match of project parts in the file path
+    // We search from the end backwards to get the longest match
+    let bestMatchIndex = -1
+    let bestMatchLength = 0
+
+    for (let i = pathParts.length - projectParts.length; i >= 0; i--) {
+      let matchLength = 0
+      for (
+        let j = 0;
+        j < projectParts.length && i + j < pathParts.length;
+        j++
+      ) {
+        if (pathParts[i + j] === projectParts[j]) {
+          matchLength++
+        } else {
+          break
+        }
       }
-    },
-    after: {
-      lines: {
-        total: afterTotals.lines.total,
-        covered: afterTotals.lines.covered,
-        skipped: afterTotals.lines.skipped,
-        pct:
-          afterTotals.lines.total - afterTotals.lines.skipped > 0
-            ? (afterTotals.lines.covered /
-                (afterTotals.lines.total - afterTotals.lines.skipped)) *
-              100
-            : 0
-      },
-      statements: {
-        total: afterTotals.statements.total,
-        covered: afterTotals.statements.covered,
-        skipped: afterTotals.statements.skipped,
-        pct:
-          afterTotals.statements.total - afterTotals.statements.skipped > 0
-            ? (afterTotals.statements.covered /
-                (afterTotals.statements.total -
-                  afterTotals.statements.skipped)) *
-              100
-            : 0
-      },
-      functions: {
-        total: afterTotals.functions.total,
-        covered: afterTotals.functions.covered,
-        skipped: afterTotals.functions.skipped,
-        pct:
-          afterTotals.functions.total - afterTotals.functions.skipped > 0
-            ? (afterTotals.functions.covered /
-                (afterTotals.functions.total - afterTotals.functions.skipped)) *
-              100
-            : 0
-      },
-      branches: {
-        total: afterTotals.branches.total,
-        covered: afterTotals.branches.covered,
-        skipped: afterTotals.branches.skipped,
-        pct:
-          afterTotals.branches.total - afterTotals.branches.skipped > 0
-            ? (afterTotals.branches.covered /
-                (afterTotals.branches.total - afterTotals.branches.skipped)) *
-              100
-            : 0
+
+      if (matchLength > bestMatchLength) {
+        bestMatchLength = matchLength
+        bestMatchIndex = i
+      }
+
+      // If we found a complete match, use it
+      if (matchLength === projectParts.length) {
+        break
       }
     }
-  }
-}
 
-function getChangeEmoji(change: number): string {
-  if (change > 0) return '🟢'
-  if (change < 0) return '🟡'
-  return '⚪'
-}
-
-function formatPercentage(value: number): string {
-  return `${value.toFixed(2)}%`
-}
-
-function formatChange(change: number): string {
-  const emoji = getChangeEmoji(change)
-  const sign = change > 0 ? '+' : ''
-  return `${emoji} ${sign}${change.toFixed(2)}%`
-}
-
-function compareProjects(
-  newProjects: ProjectCoverage[],
-  oldProjects: ProjectCoverage[]
-): ProjectDiff[] {
-  const diffs: ProjectDiff[] = []
-  const oldProjectMap = new Map<string, ProjectCoverage>()
-
-  for (const oldProject of oldProjects) {
-    oldProjectMap.set(oldProject.projectPath, oldProject)
-  }
-
-  for (const newProject of newProjects) {
-    const oldProject = oldProjectMap.get(newProject.projectPath)
-
-    if (!oldProject) {
-      // New project
-      diffs.push({
-        projectName: newProject.projectPath,
-        projectPath: newProject.projectPath,
-        before: {
-          lines: {total: 0, covered: 0, skipped: 0, pct: 0},
-          statements: {total: 0, covered: 0, skipped: 0, pct: 0},
-          functions: {total: 0, covered: 0, skipped: 0, pct: 0},
-          branches: {total: 0, covered: 0, skipped: 0, pct: 0}
-        },
-        after: normalizeCoverageMetrics(newProject.coverage.total),
-        isNew: true,
-        hasChanges: true,
-        diffChecker: null
-      })
+    // If we found at least a partial match, construct the normalized path
+    if (bestMatchIndex >= 0 && bestMatchLength > 0) {
+      // Include the matched parts and everything after
+      const normalizedParts = pathParts.slice(bestMatchIndex)
+      normalizedPath = normalizedParts.join('/')
     } else {
-      // Existing project - check for changes using DiffChecker
-      const diffChecker = new DiffChecker(
-        newProject.coverage,
-        oldProject.coverage
+      // No match found, keep the original path (will likely appear as new/deleted)
+      core.info(
+        `Could not normalize path ${filePath} for project ${projectRelativePath}`
+      )
+    }
+
+    normalized[normalizedPath] = coverage
+  }
+
+  return normalized
+}
+
+/**
+ * Compare coverage files between new and old paths using DiffChecker
+ */
+function compareAllCoverageFiles(
+  newCoveragePath: string,
+  oldCoveragePath: string
+): ProjectComparison[] {
+  const newCoverageFiles = findCoverageSummaryFiles(newCoveragePath)
+  const comparisons: ProjectComparison[] = []
+
+  for (const newFile of newCoverageFiles) {
+    const oldFilePath = path.join(
+      oldCoveragePath,
+      newFile.relativePath,
+      'coverage-summary.json'
+    )
+
+    try {
+      const newCoverageRaw: CoverageReport = JSON.parse(
+        fs.readFileSync(newFile.fullPath, 'utf8')
       )
 
-      const normalizedOld = normalizeCoverageMetrics(oldProject.coverage.total)
-      const normalizedNew = normalizeCoverageMetrics(newProject.coverage.total)
+      // Normalize the new coverage paths
+      const newCoverage = normalizeCoveragePaths(
+        newCoverageRaw,
+        newFile.relativePath
+      )
 
-      const hasChanges =
-        normalizedNew.lines.pct !== normalizedOld.lines.pct ||
-        normalizedNew.statements.pct !== normalizedOld.statements.pct ||
-        normalizedNew.functions.pct !== normalizedOld.functions.pct ||
-        normalizedNew.branches.pct !== normalizedOld.branches.pct
+      let oldCoverage: CoverageReport
+      let isNew = false
 
-      if (hasChanges) {
-        diffs.push({
-          projectName: newProject.projectPath,
-          projectPath: newProject.projectPath,
-          before: normalizedOld,
-          after: normalizedNew,
-          isNew: false,
-          hasChanges: true,
-          diffChecker
-        })
+      if (fs.existsSync(oldFilePath)) {
+        const oldCoverageRaw: CoverageReport = JSON.parse(
+          fs.readFileSync(oldFilePath, 'utf8')
+        )
+        // Normalize the old coverage paths
+        oldCoverage = normalizeCoveragePaths(
+          oldCoverageRaw,
+          newFile.relativePath
+        )
+      } else {
+        // No old coverage found - this is a new project
+        core.info(`New project found: ${newFile.relativePath}`)
+        oldCoverage = {total: newCoverage.total} // Empty old coverage
+        isNew = true
       }
+
+      const diffChecker = new DiffChecker(
+        newCoverage,
+        oldCoverage,
+        newFile.relativePath
+      )
+      comparisons.push({
+        projectPath: newFile.relativePath,
+        diffChecker,
+        isNew,
+        newCoverage,
+        oldCoverage
+      })
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      core.warning(
+        `Failed to process coverage files for ${newFile.relativePath}: ${errorMsg}`
+      )
     }
   }
 
-  return diffs
+  return comparisons
 }
 
-function formatMonorepoCoverageComment(
-  projectDiffs: ProjectDiff[],
+/**
+ * Calculate weighted overall coverage change across all projects
+ */
+function calculateWeightedCoverageChange(
+  comparisons: ProjectComparison[]
+): {
+  statements: {pct: number; diff: number}
+  branches: {pct: number; diff: number}
+  functions: {pct: number; diff: number}
+  lines: {pct: number; diff: number}
+  hasData: boolean
+} {
+  const baselineStatements = {total: 0, covered: 0}
+  const baselineBranches = {total: 0, covered: 0}
+  const baselineFunctions = {total: 0, covered: 0}
+  const baselineLines = {total: 0, covered: 0}
+
+  const currentStatements = {total: 0, covered: 0}
+  const currentBranches = {total: 0, covered: 0}
+  const currentFunctions = {total: 0, covered: 0}
+  const currentLines = {total: 0, covered: 0}
+
+  for (const comparison of comparisons) {
+    if (comparison.isNew) {
+      continue // Skip new projects for baseline calculation
+    }
+
+    const oldTotal = comparison.oldCoverage.total
+    const newTotal = comparison.newCoverage.total
+
+    if (!oldTotal || !newTotal) {
+      continue
+    }
+
+    // Aggregate baseline (old) coverage
+    baselineStatements.total += oldTotal.statements.total
+    baselineStatements.covered += oldTotal.statements.covered
+    baselineBranches.total += oldTotal.branches.total
+    baselineBranches.covered += oldTotal.branches.covered
+    baselineFunctions.total += oldTotal.functions.total
+    baselineFunctions.covered += oldTotal.functions.covered
+    baselineLines.total += oldTotal.lines.total
+    baselineLines.covered += oldTotal.lines.covered
+
+    // Aggregate current (new) coverage
+    currentStatements.total += newTotal.statements.total
+    currentStatements.covered += newTotal.statements.covered
+    currentBranches.total += newTotal.branches.total
+    currentBranches.covered += newTotal.branches.covered
+    currentFunctions.total += newTotal.functions.total
+    currentFunctions.covered += newTotal.functions.covered
+    currentLines.total += newTotal.lines.total
+    currentLines.covered += newTotal.lines.covered
+  }
+
+  // Calculate percentages and diffs
+  const calcPct = (covered: number, total: number): number => {
+    if (total === 0) return 0
+    return Math.round((covered / total) * 10000) / 100
+  }
+
+  const baselineStatementsPct = calcPct(
+    baselineStatements.covered,
+    baselineStatements.total
+  )
+  const currentStatementsPct = calcPct(
+    currentStatements.covered,
+    currentStatements.total
+  )
+
+  const baselineBranchesPct = calcPct(
+    baselineBranches.covered,
+    baselineBranches.total
+  )
+  const currentBranchesPct = calcPct(
+    currentBranches.covered,
+    currentBranches.total
+  )
+
+  const baselineFunctionsPct = calcPct(
+    baselineFunctions.covered,
+    baselineFunctions.total
+  )
+  const currentFunctionsPct = calcPct(
+    currentFunctions.covered,
+    currentFunctions.total
+  )
+
+  const baselineLinesPct = calcPct(baselineLines.covered, baselineLines.total)
+  const currentLinesPct = calcPct(currentLines.covered, currentLines.total)
+
+  const roundDiff = (diff: number): number =>
+    Math.round((diff + Number.EPSILON) * 100) / 100
+
+  return {
+    statements: {
+      pct: currentStatementsPct,
+      diff: roundDiff(currentStatementsPct - baselineStatementsPct)
+    },
+    branches: {
+      pct: currentBranchesPct,
+      diff: roundDiff(currentBranchesPct - baselineBranchesPct)
+    },
+    functions: {
+      pct: currentFunctionsPct,
+      diff: roundDiff(currentFunctionsPct - baselineFunctionsPct)
+    },
+    lines: {
+      pct: currentLinesPct,
+      diff: roundDiff(currentLinesPct - baselineLinesPct)
+    },
+    hasData:
+      baselineStatements.total > 0 ||
+      baselineBranches.total > 0 ||
+      baselineFunctions.total > 0 ||
+      baselineLines.total > 0
+  }
+}
+
+/**
+ * Format the coverage comparison comment with collapsed sections for each project
+ */
+function formatCoverageComment(
+  comparisons: ProjectComparison[],
   commitSha: string,
   baseSha: string | undefined,
   customComment?: string
 ): string {
-  if (projectDiffs.length === 0) {
-    return '<!-- coverage-comparison -->\n## 📊 Coverage Report\n\nNo changes to code coverage.'
+  if (comparisons.length === 0) {
+    return '<!-- coverage-comparison -->\n## 📊 Coverage Report\n\nNo coverage data found.'
   }
-
-  const totals = calculateWeightedTotals(projectDiffs)
 
   let comment = '<!-- coverage-comparison -->\n'
 
@@ -414,114 +341,87 @@ function formatMonorepoCoverageComment(
   }
 
   comment += '## 📊 Coverage Report\n\n'
-  comment += '### Summary\n\n'
-  comment += '| Metric | Before | After | Change |\n'
-  comment += '|--------|--------|-------|--------|\n'
 
-  const linesChange = totals.after.lines.pct - totals.before.lines.pct
-  const stmtsChange = totals.after.statements.pct - totals.before.statements.pct
-  const funcsChange = totals.after.functions.pct - totals.before.functions.pct
-  const branchesChange = totals.after.branches.pct - totals.before.branches.pct
+  // Filter out projects with no changes (only show projects with actual coverage differences)
+  const projectsWithChanges = comparisons.filter(comparison => {
+    const coverageDetails = comparison.diffChecker.getCoverageDetails(true, '')
+    return comparison.isNew || coverageDetails.length > 0
+  })
 
-  comment += `| Lines | ${formatPercentage(
-    totals.before.lines.pct
-  )} | ${formatPercentage(totals.after.lines.pct)} | ${formatChange(
-    linesChange
-  )} |\n`
-  comment += `| Statements | ${formatPercentage(
-    totals.before.statements.pct
-  )} | ${formatPercentage(totals.after.statements.pct)} | ${formatChange(
-    stmtsChange
-  )} |\n`
-  comment += `| Functions | ${formatPercentage(
-    totals.before.functions.pct
-  )} | ${formatPercentage(totals.after.functions.pct)} | ${formatChange(
-    funcsChange
-  )} |\n`
-  comment += `| Branches | ${formatPercentage(
-    totals.before.branches.pct
-  )} | ${formatPercentage(totals.after.branches.pct)} | ${formatChange(
-    branchesChange
-  )} |\n`
+  if (projectsWithChanges.length === 0) {
+    comment += 'No changes to code coverage.\n\n'
+  } else {
+    comment += `Found ${projectsWithChanges.length} project(s) with coverage changes.\n\n`
 
-  comment += '\n### 📦 Package Details\n\n'
+    // Calculate weighted overall coverage change across ALL projects (not just ones with changes)
+    const weightedCoverage = calculateWeightedCoverageChange(comparisons)
 
-  for (const project of projectDiffs) {
-    if (project.isNew) {
-      comment += `<details>\n`
-      comment += `<summary>📦 ${project.projectName} (🆕 New Project)</summary>\n\n`
-      comment += '#### Package Summary\n\n'
-      comment += '| Metric | Coverage |\n'
-      comment += '|--------|----------|\n'
-      comment += `| Lines | ${formatPercentage(project.after.lines.pct)} |\n`
-      comment += `| Statements | ${formatPercentage(
-        project.after.statements.pct
-      )} |\n`
-      comment += `| Functions | ${formatPercentage(
-        project.after.functions.pct
-      )} |\n`
-      comment += `| Branches | ${formatPercentage(
-        project.after.branches.pct
-      )} |\n`
-      comment += '\n</details>\n\n'
-    } else if (project.hasChanges && project.diffChecker) {
-      const projectLinesChange =
-        project.after.lines.pct - project.before.lines.pct
-      const projectStmtsChange =
-        project.after.statements.pct - project.before.statements.pct
-      const projectFuncsChange =
-        project.after.functions.pct - project.before.functions.pct
-      const projectBranchesChange =
-        project.after.branches.pct - project.before.branches.pct
+    if (weightedCoverage.hasData) {
+      // Add summary table showing weighted overall coverage change
+      comment += '### Overall Coverage Change\n\n'
+      comment +=
+        '| Status | Metric | Statements % | Branches % | Functions % | Lines % |\n'
+      comment +=
+        '|--------|--------|--------------|------------|-------------|----------|\n'
 
-      comment += `<details>\n`
-      comment += `<summary>📦 ${project.projectName} (${formatChange(
-        projectLinesChange
-      )})</summary>\n\n`
-      comment += '#### Package Summary\n\n'
-      comment += '| Metric | Before | After | Change |\n'
-      comment += '|--------|--------|-------|--------|\n'
-      comment += `| Lines | ${formatPercentage(
-        project.before.lines.pct
-      )} | ${formatPercentage(project.after.lines.pct)} | ${formatChange(
-        projectLinesChange
-      )} |\n`
-      comment += `| Statements | ${formatPercentage(
-        project.before.statements.pct
-      )} | ${formatPercentage(project.after.statements.pct)} | ${formatChange(
-        projectStmtsChange
-      )} |\n`
-      comment += `| Functions | ${formatPercentage(
-        project.before.functions.pct
-      )} | ${formatPercentage(project.after.functions.pct)} | ${formatChange(
-        projectFuncsChange
-      )} |\n`
-      comment += `| Branches | ${formatPercentage(
-        project.before.branches.pct
-      )} | ${formatPercentage(project.after.branches.pct)} | ${formatChange(
-        projectBranchesChange
-      )} |\n`
+      // Determine overall status icon
+      const overallDiff =
+        weightedCoverage.statements.diff +
+        weightedCoverage.branches.diff +
+        weightedCoverage.functions.diff +
+        weightedCoverage.lines.diff
+      const statusIcon = overallDiff < 0 ? ':red_circle:' : ':green_circle:'
 
-      // Use DiffChecker to get file-level details
-      const coverageDetails = project.diffChecker.getCoverageDetails(true, '')
+      const formatDiff = (diff: number): string => {
+        return diff >= 0 ? `(+${diff})` : `(${diff})`
+      }
+
+      comment += `| ${statusIcon} | **Total** | ${
+        weightedCoverage.statements.pct
+      } **${formatDiff(weightedCoverage.statements.diff)}** | ${
+        weightedCoverage.branches.pct
+      } **${formatDiff(weightedCoverage.branches.diff)}** | ${
+        weightedCoverage.functions.pct
+      } **${formatDiff(weightedCoverage.functions.diff)}** | ${
+        weightedCoverage.lines.pct
+      } **${formatDiff(weightedCoverage.lines.diff)}** |\n`
+
+      comment += '\n---\n\n'
+    }
+
+    // Add collapsed section for each project with changes
+    for (const comparison of projectsWithChanges) {
+      const projectName = comparison.projectPath || 'root'
+      const coverageDetails = comparison.diffChecker.getCoverageDetails(
+        true,
+        ''
+      )
+
+      if (comparison.isNew) {
+        comment += `<details>\n`
+        comment += `<summary>📦 ${projectName} (🆕 New Project)</summary>\n\n`
+      } else {
+        comment += `<details>\n`
+        comment += `<summary>📦 ${projectName}</summary>\n\n`
+      }
+
+      comment +=
+        '| Status | File | Statements % | Branches % | Functions % | Lines % |\n'
+      comment +=
+        '|--------|------|--------------|------------|-------------|----------|\n'
 
       if (coverageDetails.length > 0) {
-        comment += '\n#### Files with Changes\n\n'
-        comment += coverageDetails.join('\n')
-        comment += '\n'
+        comment += `${coverageDetails.join('\n')}\n`
+      } else {
+        comment += '*No changes detected*\n'
       }
 
       comment += '\n</details>\n\n'
     }
   }
 
-  const totalFileCount = projectDiffs.reduce((acc, p) => {
-    return acc + Object.keys(p.after).length - 1
-  }, 0)
-
-  comment += `**Baseline:** \`${baseSha || 'unknown'}\`\n`
-  comment += `**Current:** \`${commitSha}\`\n`
-  comment += `**Files with coverage:** ${totalFileCount}\n\n`
+  comment += `\n**Baseline:** \`${baseSha || 'unknown'}\`\n`
+  comment += `**Current:** \`${commitSha}\`\n\n`
   comment += '---\n\n'
   comment +=
     '*This comment is automatically updated with the latest coverage data.*\n'
@@ -545,28 +445,30 @@ async function run(): Promise<void> {
     const customComment = core.getInput('comment') || undefined
     const commentIdentifier = `<!-- coverage-comparison -->`
     let totalDelta = null
-    if (rawTotalDelta !== null) {
+    if (rawTotalDelta !== null && rawTotalDelta !== '') {
       totalDelta = Number(rawTotalDelta)
     }
     let commentId = null
 
-    // Find all coverage files in the directories
-    const newProjects = findCoverageSummaryFiles(newCoveragePath)
-    const oldProjects = findCoverageSummaryFiles(oldCoveragePath)
+    // Compare all coverage files using DiffChecker
+    const comparisons = compareAllCoverageFiles(
+      newCoveragePath,
+      oldCoveragePath
+    )
 
-    core.info(`Found ${newProjects.length} projects in new coverage`)
-    core.info(`Found ${oldProjects.length} projects in old coverage`)
+    core.info(`Found ${comparisons.length} projects with coverage data`)
 
-    const projectDiffs = compareProjects(newProjects, oldProjects)
     const baseSha = github.context.payload.pull_request?.base.sha
 
-    const messageToPost = formatMonorepoCoverageComment(
-      projectDiffs,
+    // Generate the comment
+    const messageToPost = formatCoverageComment(
+      comparisons,
       commitSha,
       baseSha,
       customComment
     )
 
+    // Post or update the comment
     if (useSameComment) {
       commentId = await findComment(
         githubClient,
@@ -586,58 +488,29 @@ async function run(): Promise<void> {
       prNumber
     )
 
-    // Check if coverage falls below delta
-    if (projectDiffs.length > 0) {
-      // Check total coverage across all metrics if totalDelta is set
-      if (totalDelta !== null) {
-        const totals = calculateWeightedTotals(projectDiffs)
-        const metrics = [
-          {
-            name: 'lines',
-            change: totals.after.lines.pct - totals.before.lines.pct
-          },
-          {
-            name: 'statements',
-            change: totals.after.statements.pct - totals.before.statements.pct
-          },
-          {
-            name: 'functions',
-            change: totals.after.functions.pct - totals.before.functions.pct
-          },
-          {
-            name: 'branches',
-            change: totals.after.branches.pct - totals.before.branches.pct
-          }
-        ]
-
-        for (const metric of metrics) {
-          if (metric.change < -totalDelta) {
-            const errorMessage = `Current PR reduces the total ${
-              metric.name
-            } coverage by ${Math.abs(metric.change).toFixed(
-              2
-            )}% (threshold: ${totalDelta}%)`
-            core.setFailed(errorMessage)
-            return
-          }
-        }
-      }
-
-      // Check per-project coverage using DiffChecker (checks all metrics)
-      for (const project of projectDiffs) {
-        if (!project.isNew && project.diffChecker) {
-          if (
-            project.diffChecker.checkIfTestCoverageFallsBelowDelta(delta, null)
-          ) {
-            const errorMessage = `Project ${project.projectName} coverage reduced below threshold (${delta}%)`
-            core.setFailed(errorMessage)
-            return
-          }
+    // Check if any project's coverage falls below delta threshold
+    for (const comparison of comparisons) {
+      if (!comparison.isNew) {
+        if (
+          comparison.diffChecker.checkIfTestCoverageFallsBelowDelta(
+            delta,
+            totalDelta
+          )
+        ) {
+          const totalDeltaMsg =
+            totalDelta !== null ? `, total_delta: ${totalDelta}%` : ''
+          const errorMessage = `Project ${comparison.projectPath} coverage reduced below threshold (delta: ${delta}%${totalDeltaMsg})`
+          core.setFailed(errorMessage)
+          return
         }
       }
     }
   } catch (error) {
-    core.setFailed(error)
+    if (error instanceof Error) {
+      core.setFailed(error.message)
+    } else {
+      core.setFailed(String(error))
+    }
   }
 }
 
