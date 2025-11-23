@@ -12,10 +12,13 @@ const removedCoverageIcon = ':x:'
 
 export class DiffChecker {
   private diffCoverageReport: DiffCoverageReport = {}
+  private projectPath: string
   constructor(
     coverageReportNew: CoverageReport,
-    coverageReportOld: CoverageReport
+    coverageReportOld: CoverageReport,
+    projectPath: string = ''
   ) {
+    this.projectPath = projectPath
     const reportNewKeys = Object.keys(coverageReportNew)
     const reportOldKeys = Object.keys(coverageReportOld)
     const reportKeys = new Set([...reportNewKeys, ...reportOldKeys])
@@ -83,8 +86,10 @@ export class DiffChecker {
         coverageData => coverageData.newPct === 0
       )
       if (fileRemovedCoverage) {
+        const displayName =
+          file === 'total' && this.projectPath ? this.projectPath : file
         core.info(
-          `${file} : deleted or renamed and is not considered for coverage diff.`
+          `${displayName} : deleted or renamed and is not considered for coverage diff.`
         )
         // since the file is deleted don't include in delta calculation
         continue
@@ -122,13 +127,13 @@ export class DiffChecker {
       coverageData => coverageData.newPct === 0
     )
     if (fileNewCoverage) {
-      return ` ${newCoverageIcon} | **${name}** | **${diffFileCoverageData.statements.newPct}** | **${diffFileCoverageData.branches.newPct}** | **${diffFileCoverageData.functions.newPct}** | **${diffFileCoverageData.lines.newPct}**`
+      return `| ${newCoverageIcon} | **${name}** | **${diffFileCoverageData.statements.newPct}** | **${diffFileCoverageData.branches.newPct}** | **${diffFileCoverageData.functions.newPct}** | **${diffFileCoverageData.lines.newPct}** |`
     } else if (fileRemovedCoverage) {
-      return ` ${removedCoverageIcon} | ~~${name}~~ | ~~${diffFileCoverageData.statements.oldPct}~~ | ~~${diffFileCoverageData.branches.oldPct}~~ | ~~${diffFileCoverageData.functions.oldPct}~~ | ~~${diffFileCoverageData.lines.oldPct}~~`
+      return `| ${removedCoverageIcon} | ~~${name}~~ | ~~${diffFileCoverageData.statements.oldPct}~~ | ~~${diffFileCoverageData.branches.oldPct}~~ | ~~${diffFileCoverageData.functions.oldPct}~~ | ~~${diffFileCoverageData.lines.oldPct}~~ |`
     }
     // Coverage existed before so calculate the diff status
     const statusIcon = this.getStatusIcon(diffFileCoverageData)
-    return ` ${statusIcon} | ${name} | ${
+    return `| ${statusIcon} | ${name} | ${
       diffFileCoverageData.statements.newPct
     } **(${this.getPercentageDiff(diffFileCoverageData.statements)})** | ${
       diffFileCoverageData.branches.newPct
@@ -136,7 +141,7 @@ export class DiffChecker {
       diffFileCoverageData.functions.newPct
     } **(${this.getPercentageDiff(diffFileCoverageData.functions)})** | ${
       diffFileCoverageData.lines.newPct
-    } **(${this.getPercentageDiff(diffFileCoverageData.lines)})**`
+    } **(${this.getPercentageDiff(diffFileCoverageData.lines)})** |`
   }
 
   private compareCoverageValues(
@@ -163,9 +168,9 @@ export class DiffChecker {
     diffFileCoverageData: DiffFileCoverageData
   ): ':green_circle:' | ':red_circle:' {
     let overallDiff = 0
-    Object.values(diffFileCoverageData).forEach(coverageData => {
+    for (const coverageData of Object.values(diffFileCoverageData)) {
       overallDiff = overallDiff + this.getPercentageDiff(coverageData)
-    })
+    }
     if (overallDiff < 0) {
       return decreasedCoverageIcon
     }
